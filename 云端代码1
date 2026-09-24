@@ -1,0 +1,17 @@
+SELECT 
+    substr(business_date,1,7) as y_m,
+    if(first_department_describe='瑞鲸科技','瑞鲸公司',first_department_describe) as first_department_describe,
+    second_department_describe,
+    third_department_describe,
+    substr(age,2,3) as age,
+    age as age1,
+    work_year,
+    substr(work_year,2,3) as work_year1,
+    CAST( ROUND( CAST(work_year AS DOUBLE), 0 ) AS INT ) AS work_year2,
+    emploee_num
+from ods_rj.ods_rj_hr_employee_df
+ORDER BY y_m desc
+;
+
+
+select * from dwd_rj.dwd_rj_hr_employee_work_year_df a where ds = '2026-09-14' order by y_m desc
