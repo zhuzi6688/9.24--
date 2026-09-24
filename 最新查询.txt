@@ -3,6 +3,7 @@
 -- author: linyangbin
 -- create time: 2025/12/18 16:47:15 GMT+08:00
 -- ******************************************************************** --
+修改
 --drop TABLE dwd_rj.dwd_rj_hr_employee_company_year_df;
 CREATE TABLE IF NOT EXISTS  
 	dwd_rj.dwd_rj_hr_employee_company_year_df (
