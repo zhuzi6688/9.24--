@@ -1,0 +1,582 @@
+-- HIVE sql 
+-- ******************************************************************** --
+-- author: wanqianan
+-- create time: 2025/04/23 09:41:45 GMT+08:00
+-- ****************************************
+--MRO-明细表
+-- SELECT * FROM dwd_rj.dwd_rj_mro_material_cost_reduction_accounting_detail_df where ds = '2025-04-26' limit 1000
+-- drop TABLE dwd_rj.dwd_rj_mro_material_cost_reduction_accounting_detail_df;
+-- CREATE TABLE IF NOT EXISTS
+-- 	dwd_rj.dwd_rj_mro_material_cost_reduction_accounting_detail_df ( --MRO物料降本核算明细表dwd层
+--         period STRING COMMENT '日期',
+--         item_category STRING COMMENT '物料品类',
+--         vendor_code STRING COMMENT '供应商代码',
+--         werks STRING COMMENT '工厂',
+--         lgort STRING COMMENT '库位',
+--         customer STRING COMMENT '客户',
+--         item_number STRING COMMENT '物料号',
+--         name_of_item STRING COMMENT '物料名称',
+--         buyer STRING COMMENT '采购员',
+--         track STRING COMMENT '赛道',
+--         reduce_cost_category STRING COMMENT '降本品类',
+--         quantity_received DECIMAL(20,4) COMMENT '收货数量',
+--         base_price DECIMAL(20,4) COMMENT '基准价格',
+--         contract_price_for_current_year DECIMAL(20,4) COMMENT '当年合同价格',
+--         contract_price_ref_year STRING COMMENT '合同价格取值来源年份',
+--         budget_decline DECIMAL(20,4) COMMENT '预算降幅'
+-- 	) COMMENT 'MRO物料降本核算明细表-dwd层' PARTITIONED BY (ds STRING COMMENT '分区字段');
+
+
+
+WITH
+	lgort_data AS (
+	   SELECT  werks,lgort,butxt as company_name from (
+	    (SELECT * from ods_rj.ods_rj_sap_zmm_rjsc_werks_df) as a 
+	    LEFT JOIN (SELECT * from ods_rj.ods_rj_sap_t001_df) as b
+	    on a.mandt=b.mandt and a.burks=b.bukrs
+	)
+    ),
+zmm1j AS (
+SELECT
+-- 	TO_DATE(budat, 'YYYYMMDD') as budat,
+-- budat,
+DATE_FORMAT(
+        TO_DATE(
+            CONCAT_WS('-',
+                SUBSTR(TRIM(budat), 1, 4),
+                SUBSTR(TRIM(budat), 5, 2),
+                SUBSTR(TRIM(budat), 7, 2)
+            )
+        ), 
+        'yyyy-MM-dd'
+    ) as budat,
+	rkwa.lifnr as lifnr,--供应商
+	rkwa.werks as werks,--工厂 
+	regexp_replace(rkwa.matnr,'^0+','') as matnr,--物料编号
+	makt.maktx as maktx,--物料描述
+	mseg.lgort,--库位
+	company_name,--客户
+-- 	'2' as flag,--寄售
+-- 	company_name,
+	SUM(
+		CASE
+			WHEN shkzg = 'S' THEN -1 *bstmg
+			WHEN shkzg = 'H' THEN     bstmg
+			ELSE 0
+		END
+	) AS menge --数量
+FROM
+	ods_rj.ods_rj_sap_rkwa_df rkwa
+	LEFT JOIN (SELECT * from ods_rj.ods_rj_sap_makt_df WHERE spras='1') makt ON regexp_replace(rkwa.matnr,'^0+','') =regexp_replace(makt.matnr,'^0+','') 
+	LEFT JOIN (select   matnr,mblnr,lgort,zeile from ods_rj.ods_rj_sap_mseg_di GROUP BY matnr
+	,mblnr,lgort,zeile) as mseg
+    on rkwa.mblnr=mseg.mblnr  and regexp_replace(rkwa.matnr,'^0+','')=regexp_replace(mseg.matnr,'^0+','')
+    and rkwa.zeile=mseg.zeile
+    LEFT JOIN  lgort_data
+    on mseg.lgort=lgort_data.lgort and rkwa.werks=lgort_data.werks
+	WHERE budat >='20251226'
+	--工厂限制
+     and rkwa.werks  in ('RJ01','RJ02','RJ03','RJ04','RJ06','RJ07')
+-- 	and bukrs in ('1000','1010','1020','1070','2060','6000','6040')
+	--按照日期，供应商，物料号，物料描述 
+GROUP BY
+	budat,
+	rkwa.lifnr,
+	rkwa.werks,--工厂
+	rkwa.matnr,
+	makt.maktx,
+	mseg.lgort,--库位
+	company_name--客户
+	),
+	base_p AS (
+		--获取ZMM62的价格
+		SELECT
+			REGEXP_REPLACE(matnr, '^0+', '') AS matnr,
+			-- esokz,
+			--werks,
+			SUBSTR(prdat, 1, 4) AS current_year, --取当前年份
+			MIN(naked_price) AS base_price --当前年份价格
+		FROM
+			(
+				SELECT
+					matnr, --物料号
+					zcontno,
+					--werks,--工厂
+					-- 	esokz,
+					erdat, --开始时间
+					prdat, --结束时间
+					aedat2,
+					(netpr / kpein) - zmoldpr - zftjg - zbzf - zyf1 - zyf2 - zyf3 AS naked_price --裸件价格
+				FROM
+					ods_rj.ods_rj_sap_zprice_df
+				WHERE
+					SUBSTR(erdat, 1, 4) >= '2024'
+					--限制取结束时间为12月份的
+					and substr(prdat, 5, 2)='12'
+					--限制物料号不为跨年结算
+					and zremark!='跨年结算'
+					and zflag1='Y'
+					--需要去除瑞鲸的人员
+					and lifnr!='3204'
+			) AS zmm
+			--取物料的一年中最低的价格
+		GROUP BY
+			matnr,
+			SUBSTR(prdat, 1, 4)
+			-- 	,esokz
+	),
+contract_p AS (
+		--获取ZMM62的合同价格
+		SELECT
+			matnr,
+			lifnr,
+			werks,
+			erdat,
+			prdat,
+			aedat2,
+			current_price
+		FROM
+			(
+				SELECT
+					REGEXP_REPLACE(matnr, '^0+', '') AS matnr, --物料号
+					lifnr, --供应商
+					werks, --工厂
+					erdat, --开始时间
+					prdat, --结束时间
+					aedat2,
+					(netpr / kpein) - zmoldpr - zftjg - zbzf - zyf1 - zyf2 - zyf3 AS current_price, --今年裸件价格
+					ROW_NUMBER() OVER (
+						PARTITION BY
+							REGEXP_REPLACE(matnr, '^0+', ''),
+							lifnr,
+							werks,
+							SUBSTR(prdat, 1, 4),
+							werks
+						ORDER BY
+							prdat desc,aedat2 DESC
+					) AS rn
+				FROM
+					ods_rj.ods_rj_sap_zprice_df
+				WHERE
+					SUBSTR(erdat, 1, 4) >= '2024'
+					and lifnr!='3204'
+					and zflag1='Y'
+					--需要去除瑞鲸的人员
+					and lifnr!='3204'
+					and werks  in ('RJ01','RJ02','RJ03','RJ04','RJ06','RJ07')
+			) t
+		WHERE
+			rn = 1 -- 只取每个分组的最新记录
+	),
+zmm1k AS (
+--获取ZMM1K的值
+SELECT
+-- 	budat, --记账日期
+	DATE_FORMAT(
+        TO_DATE(
+            CONCAT_WS('-',
+                SUBSTR(TRIM(budat), 1, 4),
+                SUBSTR(TRIM(budat), 5, 2),
+                SUBSTR(TRIM(budat), 7, 2)
+            )
+        ), 
+        'yyyy-MM-dd'
+    ) as budat,
+	lifnr,--供应商
+	ekpo.werks,--工厂
+	regexp_replace(ekpo.matnr,'^0+','') as matnr, --物料编号
+	maktx,--物料描述
+-- 	'0' as flag,--寄售
+    mseg.lgort,--库位
+	company_name,--公司
+	SUM(
+		CASE
+			WHEN bwart IN ('101', '162', '123', '105') THEN menge
+			WHEN bwart IN ('102', '161', '122', '106') THEN -1 * menge
+			ELSE 0
+		END
+	) AS menge
+FROM
+	ods_rj.ods_rj_sap_ekpo_df ekpo
+	JOIN ods_rj.ods_rj_sap_ekko_df ekko ON ekpo.ebeln = ekko.ebeln
+	JOIN (SELECT * from ods_rj.ods_rj_sap_makt_df WHERE spras='1') makt ON regexp_replace(ekpo.matnr,'^0+','') = regexp_replace(makt.matnr,'^0+','') 
+	JOIN ods_qr.ods_qr_sap_ekbe_di ekbe ON ekpo.ebeln = ekbe.ebeln AND ekpo.ebelp = ekbe.ebelp 
+	LEFT JOIN (select matnr,ebeln,mblnr,lgort from ods_rj.ods_rj_sap_mseg_di  GROUP BY matnr,ebeln,mblnr,lgort) as mseg
+	on ekpo.ebeln=mseg.ebeln and ekbe.belnr=mseg.mblnr and regexp_replace(ekpo.matnr,'^0+','')=regexp_replace(mseg.matnr,'^0+','')
+	LEFT JOIN  lgort_data
+    on mseg.lgort=lgort_data.lgort and ekpo.werks=lgort_data.werks
+	WHERE budat >='20251226'
+--工厂限制
+     and  ekpo.werks  in ('RJ01','RJ02','RJ03','RJ04','RJ06','RJ07') 
+    --在很多公司里限制3204,后面逻辑是第二次新增得
+    and  bukrs='3204' and (ekpo.pstyp=3 or ekpo.pstyp=0) and ekpo.bstyp IN ('F','L') and ekko.bsart not in ('UB','UB1')
+GROUP BY
+	budat,
+	ekpo.matnr,
+	ekpo.werks,
+	maktx,
+	lifnr,
+	mseg.lgort,--库位
+	company_name--公司
+),
+	t AS (
+		SELECT
+			*,
+			CASE
+				WHEN DAY(budat) >= 26 THEN
+				--26号以后:属于下个月
+				CASE
+					WHEN MONTH(budat) = 12 THEN CONCAT(YEAR(budat) + 1, '-01')
+					ELSE CONCAT(YEAR(budat), '-', LPAD(MONTH(budat) + 1, 2, '0'))
+				END
+				ELSE
+				--25号及以前:属于本月
+				CONCAT(YEAR(budat), '-', LPAD(MONTH(budat), 2, '0'))
+			END AS y_m
+		FROM
+			(
+				SELECT
+					*,
+					'zmm1k' as 
+				FROM
+					zmm1k
+				UNION ALL
+				SELECT
+					*
+				FROM
+					zmm1j
+			) AS a
+		WHERE
+			matnr NOT IN (
+				SELECT DISTINCT
+					spare3
+				FROM
+					ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df
+				WHERE
+					ds = '${biz_date}'
+					AND spare3 IS NOT NULL
+			)
+	),
+	--需要取采购员
+creator_name AS (
+		SELECT DISTINCT
+			matnr,
+			creator_name
+		FROM
+			(
+				SELECT
+					REGEXP_REPLACE(p.matnr, '^0+', '') AS matnr,
+					c.creator_name,
+					ROW_NUMBER() OVER (
+						PARTITION BY
+							REGEXP_REPLACE(p.matnr, '^0+', '')
+						ORDER BY
+							p.aedat2 DESC
+					) AS rn
+				FROM
+					ods_rj.ods_rj_sap_zprice_df p
+					INNER JOIN (
+						SELECT
+							contract_code,
+							opposite_name,
+							c.username as creator_name,
+							ROW_NUMBER() OVER (
+								PARTITION BY
+									contract_code
+								ORDER BY
+									updated_time DESC
+							) AS contract_rn
+						FROM
+							ods_rj.ods_rj_cms_ecology_uf_zs_clm_contract_info_df  a
+							LEFT JOIN ods_rj.ods_rj_cms_ecology_uf_zs_clm_contract_infoone_df b ON b.id = a.id
+	                        AND b.delete_type = FALSE
+	                        LEFT JOIN ods_rj.ods_rj_cms_employee_df c ON c.id = b.lcjbr
+	                        AND c.delete_type = 0
+						WHERE
+							creator_name IS NOT NULL
+							AND contract_code IS NOT NULL
+					) c ON p.zcontno = c.contract_code
+					AND c.contract_rn = 1
+				WHERE
+					SUBSTR(p.erdat, 1, 4) >= '2024'
+					--需要去除瑞鲸的人员
+					and opposite_name not like '%瑞鲸%'
+			) t
+		WHERE
+			rn = 1
+	),
+	share_P AS (
+		SELECT DISTINCT
+			trim(REGEXP_REPLACE(share_matnr, '^0+', '')) as share_matnr,
+			share_matnr_name,
+			share_price,
+			share_purchaser,
+			share_category
+		FROM
+			ods_rj.ods_rj_purchase_share_benchmark_price_df
+		WHERE
+			share_matnr IS NOT NULL
+	),
+	benchmark_p AS (
+		SELECT DISTINCT
+			trim(REGEXP_REPLACE(benchmark_matnr, '^0+', '')) as benchmark_matnr,
+			benchmark_matnr_name,
+			benchmark_price,
+			benchmark_purchaser,
+			benchmark_track,
+			benchmark_category
+		FROM
+			ods_rj.ods_rj_purchase_share_benchmark_price_df
+		WHERE
+			benchmark_matnr IS NOT NULL
+	),
+directory as (
+SELECT distinct  material_code,directory_name from 
+--限制一下主机厂为RJ01-RJ06
+(SELECT * from ods_rj.ods_rj_ebd_pre_material_information_df as a WHERE is_deleted=0
+-- and factory in('RJ01','RJ02','RJ03','RJ04','RJ06','RJ07')
+) as a
+LEFT JOIN 
+(select * from  ods_rj.ods_rj_ebd_pre_lib_cat_directory_df as b WHERE is_deleted=0 and status=1 
+-- and directory_name='包装材料'
+) as b
+on  concat(regexp_extract(a.category_code, '^([^-]+-[^-]+)', 1),'-')=b.id_path
+-- WHERE  material_code='6019289'
+),
+directory_describe as (
+SELECT distinct  material_describe,directory_name from 
+(SELECT * from ods_rj.ods_rj_ebd_pre_material_information_df as a WHERE is_deleted=0
+) as a
+LEFT JOIN 
+(select * from  ods_rj.ods_rj_ebd_pre_lib_cat_directory_df as b WHERE is_deleted=0 and status=1 
+) as b
+on  concat(regexp_extract(a.category_code, '^([^-]+-[^-]+)', 1),'-')=b.id_path
+),
+mro_manual_df as (
+	SELECT y_m,reduce_cost_category as reduce_cost_category_manual,budget_decline from (
+	SELECT
+	    CONCAT(year, '-', LPAD(month, 2, '0')) AS y_m,--期间
+	    item_category,spare5 as reduce_cost_category,track,buyer,
+	    budget_decline
+	FROM (
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '1' AS month, January AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '2' AS month, February AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '3' AS month, March AS budget_declin,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '4' AS month, April AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '5' AS month, May AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '6' AS month, June AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '7' AS month, July AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '8' AS month, August AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '9' AS month, September AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '10' AS month, October AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '11' AS month, November AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	    UNION ALL
+	    SELECT year, item_category,reduce_cost_category,track,buyer, '12' AS month, December AS budget_decline,spare1 FROM ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df where ds='${biz_date}'
+	) as t_0
+	LEFT JOIN (select spare4,spare5 from ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df WHERE ds='${biz_date}' and spare4 is not null) as t_mro
+	on t_0.reduce_cost_category=t_mro.spare4
+	WHERE buyer is not null and spare1='T3'
+)as t1
+WHERE reduce_cost_category is not null 
+)
+,
+t_reduce_cost_category as (select spare4 as category ,spare5 as sys_category from ods_rj.ods_rj_purchase_mro_cost_reduction_manual_df WHERE ds='${biz_date}' and spare4 is not null)
+
+-- INSERT OVERWRITE TABLE dwd_rj.dwd_rj_mro_material_cost_reduction_accounting_detail_df PARTITION (ds = '${biz_date}')
+-- 	将ZMM1K和ZMM1J的数量累加
+
+SELECT
+	period, --日期
+	item_category, --物料品类
+	vendor_code, --供应商代码
+	werks, --工厂
+	lgort,
+	company_name,
+	item_number, --物料号
+	name_of_item, --物料名称
+	buyer, --采购员
+	track, --赛道
+	if (t_reduce_cost_category.category IS NOT NULL ,t_reduce_cost_category.category,t0.reduce_cost_category) as reduce_cost_category, --降本品类
+	SUM(sum_menge) AS quantity_received, --收货数量
+	base_price, --基准价格
+	contract_price_for_current_year, --当年合同价格
+	contract_price_ref_year,--当年合同价格对应的年份
+	budget_decline --预算降幅
+FROM
+	(
+		SELECT
+		    DISTINCT 
+			-- from_unixtime(unix_timestamp(budat, 'yyyyMMdd'), 'yyyy-MM') AS period,--日期
+			budat AS period, --日期
+			coalesce(directory.directory_name,directory_describe.directory_name) AS item_category, --物料品类
+			t2.lifnr AS vendor_code, --供应商代码
+			t2.werks AS werks, --工厂
+			t2.matnr AS item_number, --物料号
+			maktx AS name_of_item, --物料名称
+			COALESCE(
+				share_P.share_purchaser,
+				benchmark_p.benchmark_purchaser,
+				creator_name
+			) AS buyer, --采购员
+			COALESCE(
+				mro_1.track,
+				benchmark_p.benchmark_track,
+				MRO_3.track,
+				MRO_4.track
+			) AS track, --赛道
+			lgort,
+			 company_name,
+			coalesce(directory.directory_name,directory_describe.directory_name) AS reduce_cost_category, --降本品类
+			sum_menge, --收货数量
+			--先份额再独家，再25，24
+			COALESCE(
+				share_P.share_price,
+				benchmark_p.benchmark_price,
+				base_p.base_price,
+				base_p_2.base_price
+			) AS base_price, --基准价格
+			COALESCE(
+				current_price,
+				share_P.share_price,
+				benchmark_p.benchmark_price,
+				base_p.base_price,
+				base_p_2.base_price
+			) AS contract_price_for_current_year, --当年合同价格
+			CASE
+                WHEN contract_p.current_price IS NOT NULL THEN SUBSTR(contract_p.erdat, 1, 4)  
+                WHEN share_P.share_price IS NOT NULL THEN ''
+                WHEN benchmark_p.benchmark_price IS NOT NULL THEN ''
+                WHEN base_p.base_price IS NOT NULL THEN CAST(CAST(SUBSTR(t2.budat, 1, 4) AS INT) -1 AS STRING)
+                ELSE CAST(CAST(SUBSTR(t2.budat, 1, 4) AS INT) -2 AS STRING)
+            END AS contract_price_ref_year --当年合同价格对应的年份
+		FROM
+			(
+				SELECT
+					SUBSTR(y_m, 1, 7) AS budat,
+					lifnr,
+					werks,
+					matnr,
+					maktx,
+					lgort,
+					company_name,
+					SUM(menge) AS sum_menge
+				FROM
+					t
+					-- --新加标记
+				GROUP BY
+					SUBSTR(y_m, 1, 7),
+					lifnr,
+					werks,
+					matnr,
+					maktx,
+					lgort,
+					company_name
+			) AS t2
+			--获取份额价格（多家供应商）
+			LEFT JOIN share_P ON t2.matnr = REGEXP_REPLACE(share_P.share_matnr, '^0+', '')
+			--获取份额的赛道
+			LEFT JOIN (
+				SELECT DISTINCT
+					spare2,
+					purchaser,
+					track
+				FROM
+					ods_rj.ods_rj_purchase_project_cost_reduction_accounting_schedule_manual_df
+				WHERE
+					spare1 = 'MRO'
+			) AS MRO_1
+			--这里按照年份更新
+			ON share_P.share_purchaser = MRO_1.purchaser
+			AND MRO_1.spare2 = SUBSTR(budat, 1, 4)
+			--获取基准价格（独家供应商，且最低价不供应的）
+			LEFT JOIN benchmark_p ON t2.matnr = REGEXP_REPLACE(benchmark_p.benchmark_matnr, '^0+', '')
+			--获取基准价的赛道
+			LEFT JOIN (
+				SELECT DISTINCT
+					spare2,
+					purchaser,
+					track
+				FROM
+					ods_rj.ods_rj_purchase_project_cost_reduction_accounting_schedule_manual_df
+				WHERE
+					spare1 = 'MRO'
+			) AS MRO_2
+			--这里按照年份更新
+			ON benchmark_p.benchmark_purchaser = MRO_2.purchaser
+			AND MRO_2.spare2 = SUBSTR(budat, 1, 4)
+			--获取基准价格（通过年份减一）
+			LEFT JOIN base_p ON CAST(CAST(SUBSTR(budat, 1, 4) AS INT) -1 AS STRING) = base_p.current_year
+			AND t2.matnr = REGEXP_REPLACE(base_p.matnr, '^0+', '')
+			--获取基准价格（通过年份减二）
+			LEFT JOIN base_p AS base_p_2 ON CAST(CAST(SUBSTR(budat, 1, 4) AS INT) -2 AS STRING) = base_p_2.current_year
+			AND t2.matnr = REGEXP_REPLACE(base_p_2.matnr, '^0+', '')
+			--获取合同价格
+			LEFT JOIN contract_p
+			--日期，物料号和供应商相同相关联
+			ON SUBSTR(t2.budat, 1, 4) = SUBSTR(contract_p.erdat, 1, 4)
+-- 			AND SUBSTR(t2.budat, 1, 4) = SUBSTR(contract_p.aedat2, 1, 4)
+			AND t2.matnr = contract_p.matnr
+			AND t2.lifnr = contract_p.lifnr
+			AND t2.werks = contract_p.werks
+			--获取采购员 从价格库里取
+			LEFT JOIN creator_name ON t2.matnr = creator_name.matnr
+			--获取基准价赛道（25，24年）
+			LEFT JOIN (
+				SELECT DISTINCT
+					spare2,
+					purchaser,
+					track
+				FROM
+					ods_rj.ods_rj_purchase_project_cost_reduction_accounting_schedule_manual_df
+				WHERE
+					spare1 = 'MRO'
+			) AS MRO_3 ON creator_name.creator_name = MRO_3.purchaser
+			AND MRO_3.spare2 = SUBSTR(budat, 1, 4)
+			LEFT JOIN (
+				SELECT DISTINCT
+					spare2,
+					purchaser,
+					track
+				FROM
+					ods_rj.ods_rj_purchase_project_cost_reduction_accounting_schedule_manual_df
+				WHERE
+					spare1 = 'MRO'
+			) AS MRO_4 ON creator_name.creator_name = MRO_4.purchaser
+			AND MRO_4.spare2 = SUBSTR(budat, 1, 4)
+			LEFT JOIN directory 
+			on 	t2.matnr=directory.material_code
+			LEFT JOIN directory_describe
+			on t2.maktx=directory_describe.material_describe
+	) AS t0
+LEFT JOIN 
+    mro_manual_df
+    on t0.period=mro_manual_df.y_m 
+    and t0.reduce_cost_category=mro_manual_df.reduce_cost_category_manual
+LEFT join t_reduce_cost_category on t0.reduce_cost_category = t_reduce_cost_category.sys_category
+GROUP BY
+	period, --日期
+	item_category, --物料品类
+	vendor_code, --供应商代码
+	werks, --工厂
+	item_number, --物料号
+	name_of_item, --物料名称
+	lgort,
+	company_name,--客户
+	buyer, --采购员
+	track, --赛道
+	if (t_reduce_cost_category.category IS NOT NULL ,t_reduce_cost_category.category,t0.reduce_cost_category), --降本品类
+	base_price, --基准价格
+	contract_price_for_current_year, --当年合同价格
+	contract_price_ref_year,--当年合同价格对应的年份
+	budget_decline --预算降幅
+having item_number = '6059247'
