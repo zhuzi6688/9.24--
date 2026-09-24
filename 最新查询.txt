@@ -1,0 +1,118 @@
+-- HIVE sql 
+-- ******************************************************************** --
+-- author: linyangbin
+-- create time: 2025/12/18 16:47:15 GMT+08:00
+-- ******************************************************************** --
+--drop TABLE dwd_rj.dwd_rj_hr_employee_company_year_df;
+CREATE TABLE IF NOT EXISTS  
+	dwd_rj.dwd_rj_hr_employee_company_year_df (
+	    y_m STRING COMMENT '日期',
+	    classify STRING COMMENT '分类',
+		company_platform_track STRING COMMENT '公司_平台_赛道',
+		seniority_years STRING COMMENT '瑞鲸司龄',
+		employee_sum STRING COMMENT '人数',
+		percent_people STRING COMMENT '人数占比'
+)COMMENT '瑞鲸hr-瑞鲸司龄分布' PARTITIONED BY (ds STRING COMMENT '分区字段');
+
+
+--赛道级占比
+with seniority_years_data as (
+SELECT
+    substr(update_time,1,10) as y_m,
+    -- '2025-11-01' as y_m,
+	first_department,
+	second_department,
+	third_department,
+	--这里应该用司龄的英文，之前用错了，将错就错的名称
+	case when  company_service_years <= 1 then '<=1' 
+	     when company_service_years > 1 and company_service_years <= 3 then '1-3' 
+	     when company_service_years > 3 and company_service_years <= 5 then '3-5' 
+	     when company_service_years > 5 and company_service_years <= 8 then '5-8'
+	     when company_service_years > 8 and company_service_years <= 10 then '8-10'
+	     when company_service_years > 10 and company_service_years <= 15 then '10-15'
+	     when company_service_years > 15 then '>15'
+	 end as seniority_years,
+-- 	 case when  CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 1 then '<=1' 
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 1 and CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 3 then '1-3' 
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 3 and CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 5 then '3-5' 
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 5 and CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 8 then '5-8'
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 8 and CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 10 then '8-10'
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 10 and CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) <= 15 then '10-15'
+-- 	     when CAST( ROUND( CAST(company_service_years AS DOUBLE), 0 ) AS INT ) > 15 then '>15'
+-- 	 end as seniority_years,
+	 employee_count
+FROM 
+	(select 
+	    update_time,
+	    first_department,
+	    second_department,
+	    third_department,
+	    employee_count,
+	    round(datediff('${biz_date}',hire_date) / 365,2) as company_service_years
+	from  ods_rj.ods_rj_hr_personnel_information_df
+	WHERE ds='${biz_date}') AS a
+)
+INSERT OVERWRITE     TABLE dwd_rj.dwd_rj_hr_employee_company_year_df PARTITION  (ds = '${biz_date}')
+SELECT 
+    y_m,
+    classify,
+	company_platform_track,
+	seniority_years,
+	employee_sum,
+	round(employee_sum / SUM(employee_sum) over(PARTITION by company_platform_track,y_m),4)  AS percent_people--各占比
+from (
+SELECT
+    y_m,
+	'赛道' as classify,
+	third_department as company_platform_track,
+	seniority_years,
+	SUM(employee_count) AS employee_sum
+FROM 
+	seniority_years_data 
+GROUP BY
+	third_department,
+	seniority_years,
+	y_m)as a
+UNION  ALL 
+--平台层
+SELECT 
+    y_m,
+    classify,
+	company_platform_track,
+	seniority_years,
+	employee_sum,
+	round(employee_sum  / SUM(employee_sum) over(PARTITION by company_platform_track,y_m),4)  AS percent_people--各占比
+from (
+SELECT
+    y_m,
+	'平台' as classify,
+	second_department as company_platform_track,
+	seniority_years,
+	SUM(employee_count) AS employee_sum
+FROM
+	seniority_years_data
+GROUP BY
+	second_department,
+	seniority_years,
+	y_m)as b
+UNION  ALL 
+SELECT 
+    y_m,
+    classify,
+	company_platform_track,
+	seniority_years,
+	employee_sum,
+	round(employee_sum * 100.0 / SUM(employee_sum) over(PARTITION by company_platform_track,y_m),4) AS percent_people--各占比
+from (
+SELECT
+    y_m,
+	'公司' as classify,
+	first_department as company_platform_track,
+	seniority_years,
+	SUM(employee_count) AS employee_sum
+FROM
+	seniority_years_data
+GROUP BY
+	first_department,
+	seniority_years,
+	y_m)as c;
